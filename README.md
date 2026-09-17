@@ -47,6 +47,17 @@ Requirements:
 - Output: `dist/SoLab-<version>-arm64-v8a.apk`; rebuildable caches are cleaned after delivery.
 - Platforms: Android is the primary, actively-maintained target.
 
+### 🤖 GitHub Actions 云端构建 / Build via GitHub Actions
+
+仓库自带工作流 `.github/workflows/build-apk.yml`（Flutter 3.44.1 + JDK 21），两种触发方式：
+
+- **手动**：GitHub 仓库 → Actions → Build APK → Run workflow，完成后在该次运行的 Artifacts 下载 APK。
+- **自动**：推送 `v*` 标签（如 `v2.3.1`）自动构建并创建 Release 附带 APK。
+
+云端构建默认产出**未签名** APK（无法直接安装）。如需签名包，在仓库 Settings → Secrets and variables → Actions 配置 `KEYSTORE_BASE64`（keystore 的 base64）、`KEYSTORE_PASSWORD`、`KEY_ALIAS`、`KEY_PASSWORD` 四个 secrets，工作流会自动生成 `key.properties` 完成签名。
+
+The repo includes `.github/workflows/build-apk.yml` (Flutter 3.44.1 + JDK 21). Trigger manually from the Actions tab, or push a `v*` tag to build and publish a Release. Builds are unsigned unless the `KEYSTORE_BASE64` / `KEYSTORE_PASSWORD` / `KEY_ALIAS` / `KEY_PASSWORD` secrets are configured.
+
 ## 🔄 同步上游 / Upstream sync
 
 Kelivo 固定使用 `upstream` 远端,SoLab 发布仓库使用 `origin`。提交或暂存本地改动后,执行 `powershell -ExecutionPolicy Bypass -File tools/sync_upstream.ps1`;脚本会拉取并合并上游、检查 SoLab 名称没有被覆盖,再运行关键验证。

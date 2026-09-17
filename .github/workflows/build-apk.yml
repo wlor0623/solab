@@ -1,0 +1,134 @@
+# 构建 SoLab release APK（arm64-v8a）
+#
+# 触发方式：
+#   - Actions 页面手动触发（workflow_dispatch）
+#   - 推送 v* 标签时自动构建并创建 Release
+#
+# 签名（可选）：在仓库 Settings → Secrets and variables → Actions 配置以下
+# secrets 后，产物为正式签名包；未配置时产出未签名 APK（无法直接安装）：
+#   KEYSTORE_BASE64     keystore 文件的 base64（PowerShell:
+#                       [Convert]::ToBase64String([IO.File]::ReadAllBytes("xxx.jks"))）
+#   KEYSTORE_PASSWORD   keystore 密码
+#   KEY_ALIAS           key 别名
+#   KEY_PASSWORD        key 密码
+name: Build APK
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+concurrency:
+  group: build-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build release APK (arm64-v8a)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Gradle 8.14 要求 JDK 21（与新 JDK 不兼容），见 android/gradle.properties
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+
+      # super_native_extensions 的 cargokit 预编译二进制拉取失败时需要本地
+      # cargo 编译，装上 Rust 以防万一
+      - name: Set up Rust (cargokit fallback)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.44.1'
+          channel: stable
+          cache: true
+
+      - name: Cache Android NDK
+        uses: actions/cache@v4
+        with:
+          path: /usr/local/lib/android/sdk/ndk/28.2.13676358
+          key: android-ndk-28.2.13676358
+
+      # lib/secrets/fallback.dart 被 .gitignore 排除但被 lib/ 下两处 import，
+      # CI 上需补一个空 stub（代码侧已处理空字符串 = 不启用 fallback key）
+      - name: Create secrets fallback stub
+        run: |
+          mkdir -p lib/secrets
+          if [ ! -f lib/secrets/fallback.dart ]; then
+            printf "const String siliconflowFallbackKey = '';\n" > lib/secrets/fallback.dart
+          fi
+
+      - name: Set up signing key
+        if: env.KEYSTORE_BASE64 != ''
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          echo "$KEYSTORE_BASE64" | base64 --decode > android/app/keystore.jks
+          cat > android/key.properties <<EOF
+          storeFile=keystore.jks
+          storePassword=$KEYSTORE_PASSWORD
+          keyAlias=$KEY_ALIAS
+          keyPassword=$KEY_PASSWORD
+          EOF
+          echo "SIGNED=true" >> "$GITHUB_ENV"
+
+      - name: Resolve dependencies
+        run: flutter pub get
+
+      - name: Build APK (release, arm64-v8a)
+        run: flutter build apk --release --target-platform android-arm64
+
+      - name: Collect APK
+        id: collect
+        run: |
+          VERSION="$(grep -E '^version:' pubspec.yaml | sed -E 's/^version:[[:space:]]*([0-9]+(\.[0-9]+){2}).*/\1/')"
+          NAME="SoLab-${VERSION}-arm64-v8a.apk"
+          mkdir -p dist
+          SRC="build/app/outputs/flutter-apk/app-release.apk"
+          if [ ! -f "$SRC" ]; then
+            SRC="$(ls build/app/outputs/apk/release/*.apk | head -n1)"
+          fi
+          cp "$SRC" "dist/$NAME"
+          SHA256="$(sha256sum "dist/$NAME" | cut -d' ' -f1)"
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          echo "sha256=$SHA256" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Build result"
+            echo "- APK: \`$NAME\`"
+            echo "- SHA256: \`$SHA256\`"
+            if [ "$SIGNED" = "true" ]; then
+              echo "- 签名: 已签名（release keystore）"
+            else
+              echo "- 签名: ⚠️ 未签名（未配置 KEYSTORE_BASE64 等 secrets，无法直接安装）"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.collect.outputs.name }}
+          path: dist/*.apk
+          if-no-files-found: error
+
+      - name: Create release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.apk
