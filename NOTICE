@@ -1,0 +1,65 @@
+SoLab notices
+
+SoLab is a modified derivative of Kelivo and is distributed under the GNU Affero
+General Public License v3.0. The complete license for SoLab is in LICENSE.
+
+The following are the third-party notices currently documented for components
+or materials included in this repository. Their original licenses continue to
+apply:
+
+- Kelivo: AGPL-3.0, https://github.com/Chevey339/kelivo
+- Blutter: MIT, https://github.com/worawit/blutter
+- PPTool-2.0: Apache-2.0, https://github.com/Kirlif/PPTool
+- SOMCP: AGPL-3.0, https://github.com/bilieebiliee1-design/SOMCP
+
+License texts bundled with the application are in assets/licenses/.
+
+The repository also contains prebuilt native binaries under android/app/libs/
+and android/app/src/main/jniLibs/. Their source, version, checksum, and license
+records must be verified individually before a public binary release.
+
+Historical materials or native binaries without a reproducible public source
+and license record must not be treated as redistributable source material.
+Before a public release, either document their source and license here or remove
+them from the release.
+
+The following sources are documented but do not currently declare a project
+license. Listing a source here does not grant redistribution rights:
+
+- 小奶瓶项目:
+  https://bbs.binmt.cc/thread-171312-1-1.html
+- ApkSignatureKillerEx:
+  https://github.com/L-JINBIN/ApkSignatureKillerEx
+- ApkDataMultiplexing:
+  https://github.com/L-JINBIN/ApkDataMultiplexing
+- Flutter analysis wrapper package com.ayue.flutter:
+  https://bbs.binmt.cc/thread-168571-1-1.html
+- DPatch payload (`pandora_loader.dex` and `libpandora.so`):
+  network-sourced material; no reproducible original URL or license record was
+  provided with the material. This notice does not grant redistribution rights.
+
+APK Ad Remover Editor is a historical source reference. Its files are not
+included in this repository.
+
+Known prebuilt component sources and licenses:
+
+- unidbg 0.9.9: Apache-2.0, https://github.com/zhkl0228/unidbg
+- Capstone 3.1.8 bindings/runtime: BSD, https://github.com/zhkl0228/capstone
+- Keystone 0.9.7 bindings/runtime: GPL-2.0, https://github.com/zhkl0228/keystone
+- Unicorn runtime: GPL-2.0, https://github.com/unicorn-engine/unicorn
+- Rizin runtime: LGPL-3.0/GPL-3.0 components, https://github.com/rizinorg/rizin
+- rz-ghidra runtime: LGPL-3.0, https://github.com/rizinorg/rz-ghidra
+- Ghidra-derived Sleigh data: Apache-2.0 and secondary licenses,
+  https://github.com/NationalSecurityAgency/ghidra
+- Blutter runners: MIT, https://github.com/worawit/blutter
+
+`android/app/libs/apk-data-multiplexing.jar` comes from
+https://github.com/L-JINBIN/ApkDataMultiplexing. The upstream repository does
+not declare a redistribution license. Do not publish this binary without
+written permission from its author or replacing it with a licensed
+implementation.
+
+The DPatch payload is included unchanged for source-audit and compatibility
+purposes only. Do not distribute a public binary containing it until its
+copyright holder and redistribution terms have been verified, or it has been
+replaced with a suitably licensed implementation.

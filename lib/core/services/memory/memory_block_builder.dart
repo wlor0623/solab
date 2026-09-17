@@ -1,0 +1,325 @@
+import 'dart:convert';
+
+import 'package:crypto/crypto.dart';
+
+import '../../models/memory_entry.dart';
+import '../../models/user_profile_field.dart';
+import 'memory_prompts.dart';
+
+/// Pure serialization for memory / profile injection blocks (§7.2–§7.5, §13.5).
+///
+/// No database, no `DateTime.now()`, no locale lookups.
+abstract final class MemoryBlockBuilder {
+  MemoryBlockBuilder._();
+
+  static const List<MemoryType> _typeOrder = [
+    MemoryType.identity,
+    MemoryType.workflow,
+    MemoryType.voice,
+    MemoryType.instruction,
+  ];
+
+  /// 是否属于注入范围内的记忆类型。APK 记忆（apk_patch/apk_note）刻意不在
+  /// 注入范围——它们由 APK 工具按需读取，不进每条消息前缀注入。
+  static bool isInjectableType(MemoryType type) => _typeOrder.contains(type);
+
+  /// 单类超过该条数进入 summary 模式（只列最近 [summaryKeep] 条）。
+  static const int summaryThreshold = 30;
+  static const int summaryKeep = 10;
+
+  /// 注入前缀总字符预算：超限停止追加（记忆污染防护，控制上下文成本）。
+  static const int injectionCharBudget = 8000;
+
+  static String buildMemoryBlock({
+    required List<MemoryEntry> visible,
+    required Map<MemoryType, int> totalByType,
+    required MemoryPromptLang lang,
+    required int maxItems,
+  }) {
+    final out = StringBuffer();
+    var budgetChars = 0;
+    for (final type in _typeOrder) {
+      final list = visible.where((e) => e.type == type).toList();
+      if (list.isEmpty) {
+        out.writeln('<user_memory type="${MemoryEntry.typeToString(type)}"/>');
+        continue;
+      }
+
+      final total = totalByType[type] ?? list.length;
+      final summary = total > maxItems;
+      // 最近优先：按 updatedAt 降序（新知识排前面，旧记忆可被 summary 截断）
+      final selected = List<MemoryEntry>.from(list)
+        ..sort((a, b) {
+          final byUpdated = b.updatedAt.compareTo(a.updatedAt);
+          if (byUpdated != 0) return byUpdated;
+          final byScope = _scopeRank(a.scope).compareTo(_scopeRank(b.scope));
+          if (byScope != 0) return byScope;
+          return a.id.compareTo(b.id);
+        });
+      // summary 模式只列最近 N 条
+      final kept = summary && selected.length > maxItems
+          ? selected.sublist(0, maxItems)
+          : selected;
+
+      kept.sort((a, b) {
+        final byScope = _scopeRank(a.scope).compareTo(_scopeRank(b.scope));
+        if (byScope != 0) return byScope;
+        final byCreated = a.createdAt.compareTo(b.createdAt);
+        if (byCreated != 0) return byCreated;
+        return a.id.compareTo(b.id);
+      });
+
+      if (summary) {
+        out.writeln(
+          '<user_memory type="${MemoryEntry.typeToString(type)}" mode="summary" total="$total" shown="${kept.length}">',
+        );
+      } else {
+        out.writeln('<user_memory type="${MemoryEntry.typeToString(type)}">');
+      }
+
+      for (final e in kept) {
+        final marker = e.scope == MemoryScope.assistant ? '(assistant) ' : '';
+        final line =
+            '- [${fmtDate(e.updatedAt)}] $marker${flatten(escape(e.content))}';
+        // 注入 token 预算：超限停止追加，避免记忆前缀撑爆上下文
+        if (budgetChars + line.length > injectionCharBudget) {
+          break; // 注入 token 预算超限：停止追加本条及后续
+        }
+        budgetChars += line.length;
+        out.writeln(line);
+      }
+
+      if (summary) {
+        out.writeln(MemoryPrompts.moreHintFor(lang));
+      }
+      out.writeln('</user_memory>');
+    }
+    return out.toString();
+  }
+
+  static String buildProfileBlock({
+    required List<UserProfileField> fields,
+    required MemoryPromptLang lang,
+  }) {
+    // Profile tags are language-neutral (§7.3); [lang] kept for §13.5 API.
+    final nonEmpty = fields
+        .where((f) => f.value.trim().isNotEmpty)
+        .toList(growable: false);
+    if (nonEmpty.isEmpty) return '<user_profile/>\n';
+
+    final byKey = {for (final f in nonEmpty) f.key: f};
+    final out = StringBuffer('<user_profile>\n');
+    for (final k in UserProfileField.knownKeys) {
+      final field = byKey[k];
+      if (field == null) continue;
+      out.writeln('<$k>${escape(field.value)}</$k>');
+    }
+    final customKeys = byKey.keys.where((k) => k.startsWith('custom.')).toList()
+      ..sort();
+    for (final k in customKeys) {
+      final name = k.substring('custom.'.length);
+      final field = byKey[k]!;
+      out.writeln(
+        '<custom name="${escapeAttr(name)}">${escape(field.value)}</custom>',
+      );
+    }
+    out.writeln('</user_profile>');
+    return out.toString();
+  }
+
+  /// SHA-256 of `profileBlock + memoryBlock`, hex, first 16 chars (§7.4).
+  static String hashBlocks(String profileBlock, String memoryBlock) {
+    final digest = sha256.convert(utf8.encode(profileBlock + memoryBlock));
+    return digest.toString().substring(0, 16);
+  }
+
+  static String buildFullSnapshotPrefix(
+    String profileBlock,
+    String memoryBlock,
+    MemoryPromptLang lang,
+  ) {
+    return '${MemoryPrompts.introFullFor(lang)}\n'
+        '$profileBlock$memoryBlock\n';
+  }
+
+  static String buildUpdatePrefix(
+    String profileBlock,
+    String memoryBlock,
+    MemoryPromptLang lang,
+  ) {
+    return '${MemoryPrompts.introUpdateFor(lang)}\n'
+        '<user_memory_update>\n'
+        '$profileBlock$memoryBlock'
+        '</user_memory_update>\n'
+        '\n';
+  }
+
+  /// 按需注入模式：只输出「类型 → 条数」索引，不输出记忆内容。
+  ///
+  /// 防止历史记忆污染新对话：内容一律由 AI 判断与当前任务相关时，
+  /// 经 memory_read / memory_search_profile 按需拉取。
+  static String buildMemoryHintBlock(Map<MemoryType, int> totalByType) {
+    final buf = StringBuffer('<user_memory_index>\n');
+    var any = false;
+    for (final type in _typeOrder) {
+      final count = totalByType[type] ?? 0;
+      if (count <= 0) continue;
+      buf.writeln('- ${MemoryEntry.typeToString(type)}: $count');
+      any = true;
+    }
+    if (!any) return '<user_memory_index/>\n';
+    buf.writeln('</user_memory_index>');
+    return buf.toString();
+  }
+
+  static String buildOnDemandPrefix(
+    String profileBlock,
+    String hintBlock,
+    MemoryPromptLang lang,
+  ) {
+    return '${MemoryPrompts.introOnDemandFor(lang)}\n'
+        '$profileBlock$hintBlock\n';
+  }
+
+  /// Exclusive end index of a §7.6 prefix at the start of [payload], or null.
+  static int? endOfInjectedPrefix(String payload) {
+    if (payload.isEmpty) return null;
+    return _endOfUpdatePrefix(payload) ?? _endOfFullPrefix(payload);
+  }
+
+  /// Split a frozen user payload into snapshot prefix + remaining user text.
+  static ({String prefix, String rest, String kind})? splitInjectedPrefix(
+    String payload,
+  ) {
+    final updateEnd = _endOfUpdatePrefix(payload);
+    if (updateEnd != null) {
+      return (
+        prefix: payload.substring(0, updateEnd),
+        rest: payload.substring(updateEnd),
+        kind: 'update',
+      );
+    }
+    final fullEnd = _endOfFullPrefix(payload);
+    if (fullEnd != null) {
+      return (
+        prefix: payload.substring(0, fullEnd),
+        rest: payload.substring(fullEnd),
+        kind: 'full',
+      );
+    }
+    return null;
+  }
+
+  static int? _endOfUpdatePrefix(String payload) {
+    final intro = _leadingIntro(payload, update: true);
+    if (intro == null) return null;
+    const close = '</user_memory_update>';
+    final closeAt = payload.indexOf(close, intro.length);
+    if (closeAt < 0) return null;
+    var end = closeAt + close.length;
+    if (payload.startsWith('\n\n', end)) return end + 2;
+    if (payload.startsWith('\n', end)) return end + 1;
+    return end;
+  }
+
+  static int? _endOfFullPrefix(String payload) {
+    final intro = _leadingIntro(payload, update: false);
+    if (intro == null) return null;
+    var cursor = intro.length;
+    if (payload.startsWith('\n', cursor)) cursor++;
+
+    final profile = _consumeProfileBlock(payload, cursor);
+    if (profile == null) return null;
+    cursor = profile;
+
+    for (final type in _typeOrder) {
+      final next = _consumeMemoryBlock(payload, cursor, type);
+      if (next == null) return null;
+      cursor = next;
+    }
+    if (payload.startsWith('\n', cursor)) cursor++;
+    return cursor;
+  }
+
+  static String? _leadingIntro(String payload, {required bool update}) {
+    final candidates = update
+        ? [MemoryPrompts.introUpdateZh, MemoryPrompts.introUpdateEn]
+        : [MemoryPrompts.introFullZh, MemoryPrompts.introFullEn];
+    for (final intro in candidates) {
+      if (payload.startsWith(intro)) return intro;
+    }
+    return null;
+  }
+
+  static int? _consumeProfileBlock(String payload, int start) {
+    const empty = '<user_profile/>';
+    if (payload.startsWith(empty, start)) {
+      var end = start + empty.length;
+      if (payload.startsWith('\n', end)) end++;
+      return end;
+    }
+    const open = '<user_profile>';
+    const close = '</user_profile>';
+    if (!payload.startsWith(open, start)) return null;
+    final closeAt = payload.indexOf(close, start + open.length);
+    if (closeAt < 0) return null;
+    var end = closeAt + close.length;
+    if (payload.startsWith('\n', end)) end++;
+    return end;
+  }
+
+  static int? _consumeMemoryBlock(String payload, int start, MemoryType type) {
+    final head = '<user_memory type="${MemoryEntry.typeToString(type)}"';
+    if (!payload.startsWith(head, start)) return null;
+    final gt = payload.indexOf('>', start);
+    if (gt < 0) return null;
+    final tag = payload.substring(start, gt + 1);
+    if (tag.endsWith('/>')) {
+      var end = gt + 1;
+      if (payload.startsWith('\n', end)) end++;
+      return end;
+    }
+    const close = '</user_memory>';
+    final closeAt = payload.indexOf(close, gt + 1);
+    if (closeAt < 0) return null;
+    var end = closeAt + close.length;
+    if (payload.startsWith('\n', end)) end++;
+    return end;
+  }
+
+  static int _scopeRank(MemoryScope scope) {
+    switch (scope) {
+      case MemoryScope.global:
+        return 0;
+      case MemoryScope.assistant:
+        return 1;
+    }
+  }
+
+  /// `yyyy-MM-dd` from the local timezone of [timestamp].
+  static String fmtDate(DateTime timestamp) {
+    final local = timestamp.isUtc ? timestamp.toLocal() : timestamp;
+    final y = local.year.toString().padLeft(4, '0');
+    final m = local.month.toString().padLeft(2, '0');
+    final d = local.day.toString().padLeft(2, '0');
+    return '$y-$m-$d';
+  }
+
+  /// Escape `&`, `<`, `>` only (entry content never enters attributes).
+  static String escape(String text) {
+    return text
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;');
+  }
+
+  /// Escape for XML attribute values (`"` in addition to [escape]).
+  static String escapeAttr(String text) {
+    return escape(text).replaceAll('"', '&quot;');
+  }
+
+  /// Collapse newlines and whitespace runs to a single space, then trim.
+  static String flatten(String text) {
+    return text.replaceAll(RegExp(r'\s+'), ' ').trim();
+  }
+}
